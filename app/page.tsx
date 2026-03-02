@@ -53,7 +53,7 @@ const Modal = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) =>
         <h2 className="text-3xl font-bold text-white mb-4">About Hueco Mundo</h2>
         <p className="text-gray-300 mb-6">
           Hueco Mundo is the vast desert realm where Hollows reside. This endless white desert exists between the Human World and Soul Society, 
-          characterized by its perpetual night and white sand dunes stretching as far as the eye can see.
+          characterized by its perpetual night and white sand dunes stretching as far as the eye can see. And that is it.
         </p>
         <button 
           onClick={onClose}
