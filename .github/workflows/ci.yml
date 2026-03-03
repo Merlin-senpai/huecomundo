@@ -1,7 +1,7 @@
 name: CI-CD Pipeline
 
 on:
-  workflow_dispatch: # triggered manually or via n8n HTTP Request
+  workflow_dispatch: # triggered manually via n8n HTTP Request
   push:
     branches: [ main, develop, 'feature/*' ]
   pull_request:
@@ -37,9 +37,8 @@ jobs:
       # 6. Security scan - npm audit
       - name: Run npm audit
         run: npm audit --audit-level=high
-        continue-on-error: false
 
-       7. Optional: Snyk scan
+      # 7. Optional: Snyk scan
       - name: Snyk Scan
         uses: snyk/actions/node@master
         env:
@@ -47,7 +46,7 @@ jobs:
         with:
           args: test
 
-      # 8. Upload artifacts (optional)
+      # 8. Upload build artifacts (optional)
       - name: Upload build artifacts
         uses: actions/upload-artifact@v3
         with:
