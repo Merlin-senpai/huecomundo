@@ -1,16 +1,55 @@
-# .github/workflows/ci.yml
-name: CI
+name: CI-CD Pipeline
+
 on:
+  workflow_dispatch: # triggered manually or via n8n HTTP Request
   push:
-    branches:
-      - main
+    branches: [ main, develop, 'feature/*' ]
+  pull_request:
+    branches: [ main, develop ]
+
 jobs:
-  build:
+  build-test-security:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2. Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      # 3. Install dependencies
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      # 4. Build project
+      - name: Build project
+        run: npm run build
+
+      # 5. Run tests
       - name: Run tests
         run: npm test
-      
+
+      # 6. Security scan - npm audit
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: false
+
+       7. Optional: Snyk scan
+      - name: Snyk Scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: test
+
+      # 8. Upload artifacts (optional)
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts
+          path: ./build
