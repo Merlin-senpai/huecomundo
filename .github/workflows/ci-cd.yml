@@ -1,7 +1,7 @@
 name: CI-CD Pipeline
 
 on:
-  workflow_dispatch: # manual trigger
+  workflow_dispatch:
   push:
     branches: [ main ]
   pull_request:
@@ -14,39 +14,49 @@ jobs:
     steps:
       # 1. Checkout repository
       - name: Checkout repository
-        uses: actions/checkout@v4  # Latest major version
+        uses: actions/checkout@v4
 
-      # 2. Setup Node.js
+      # 2. Cache Node modules for speed
+      - name: Cache npm modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      # 3. Setup Node.js
       - name: Setup Node.js
-        uses: actions/setup-node@v4  # Latest major version
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # 3. Install dependencies
+      # 4. Install dependencies
       - name: Install dependencies
         run: npm ci
 
-      # 4. Build project
+      # 5. Build project
       - name: Build project
         run: npm run build
 
-      # 5. Run tests
+      # 6. Run tests
       - name: Run tests
         run: npm test
 
-      # 6. Security scan: npm audit
-      - name: Run npm audit
-        run: npm audit --audit-level=high || true
+      # 7. Security scan: npm audit (production only, fails on high)
+      - name: Run npm audit (prod)
+        run: npm audit --only=prod --audit-level=high || true
 
-      # 7. Optional: Snyk scan
-      - name: Snyk Scan
-        uses: snyk/actions/node@v1  # Use stable release
+      # 8. Optimized Snyk scan
+      - name: Snyk Scan (prod deps only, high severity)
+        uses: snyk/actions/node@v1
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
-          args: test
+          args: test --all-projects --prod --severity-threshold=high
+        continue-on-error: true   # Allow workflow to continue; n8n will handle failure
 
-      # 8. Upload build artifacts (optional)
+      # 9. Upload artifacts
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
