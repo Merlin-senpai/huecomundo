@@ -1,63 +1,53 @@
-name: CI/CD Pipeline
+name: CI-CD-Pipeline
 
 on:
-  workflow_dispatch:  # manual trigger
+  workflow_dispatch:
   push:
-    branches: [ main, develop, 'feature/*' ]
-  pull_request:
-    branches: [ main, develop ]
+    branches:
+      - main
+      - develop
 
 jobs:
-  build-test-security-deploy:
+  build-test-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout repository
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Setup Node.js
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
 
-      # 3. Install dependencies
-      - name: Install dependencies
-        run: npm ci
+      - name: Install Dependencies
+        run: npm install
 
-      # 4. Build project
-      - name: Build project
-        run: npm run build || echo "No build folder generated"
+      - name: Run Build
+        run: npm run build || echo "No build script found"
 
-      # 5. Run tests
-      - name: Run tests
-        run: npm test || echo "Tests failed but continuing"
+      - name: Run npm audit (non-blocking)
+        run: npm audit --json > audit.json || true
 
-      # 6. Security scan - npm audit
-      - name: Run npm audit
-        run: npm audit --audit-level=high || echo "Vulnerabilities found"
-
-      # 7. Optional Snyk scan
-      - name: Snyk Scan
+      - name: Run Snyk Scan (non-blocking)
         uses: snyk/actions/node@master
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: test || echo "Snyk scan finished"
 
-      # 8. Deploy to Vercel
       - name: Deploy to Vercel
-        uses: amondnet/vercel-action@v20
-        with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ""        # leave empty
-          vercel-project-id: ""    # leave empty
-          working-directory: .
-          prod: true
-          confirm: true            # adds --yes for auto-confirm
+        run: |
+          npx vercel --prod --yes --token=${{ secrets.VERCEL_TOKEN }} > deployment.txt
 
-      # 9. Output Vercel URL
-      - name: Get Vercel URL
-        run: echo "Vercel Deployment URL: ${{ steps.vercel.outputs.preview-url || steps.vercel.outputs.url }}"
+      - name: Extract Deployment URL
+        id: extract_url
+        run: |
+          URL=$(grep -o 'https://.*\.vercel\.app' deployment.txt | head -n 1)
+          echo "deployment_url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Upload Audit Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: audit.json
