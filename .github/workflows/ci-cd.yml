@@ -19,7 +19,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
+          cache: npm
 
       - name: Install Dependencies
         run: npm install
@@ -37,14 +37,10 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
       - name: Deploy to Vercel
+        id: deploy
         run: |
-          npx vercel --prod --yes --token=${{ secrets.VERCEL_TOKEN }} > deployment.txt
-
-      - name: Extract Deployment URL
-        id: extract_url
-        run: |
-          URL=$(grep -o 'https://.*\.vercel\.app' deployment.txt | head -n 1)
-          echo "deployment_url=$URL" >> $GITHUB_OUTPUT
+          DEPLOYMENT_URL=$(npx vercel --prod --yes --token=${{ secrets.VERCEL_TOKEN }} | grep -o 'https://.*\.vercel\.app')
+          echo "deployment_url=$DEPLOYMENT_URL" >> $GITHUB_OUTPUT
 
       - name: Upload Audit Report
         uses: actions/upload-artifact@v4
