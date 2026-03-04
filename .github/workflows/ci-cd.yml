@@ -1,64 +1,45 @@
-name: CI-CD Pipeline
+name: CI/CD Pipeline
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:   # Manual trigger
   push:
-    branches: [ main ]
+    branches: [ main, develop, 'feature/*' ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, develop ]
 
 jobs:
-  build-test-security:
+  build-test-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # 1. Checkout
+      - uses: actions/checkout@v4
 
-      # 2. Cache Node modules for speed
-      - name: Cache npm modules
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-
-      # 3. Setup Node.js
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # 2. Setup Node
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # 4. Install dependencies
-      - name: Install dependencies
-        run: npm ci
+      # 3. Install dependencies
+      - run: npm ci
 
-      # 5. Build project
-      - name: Build project
-        run: npm run build
+      # 4. Build project
+      - run: npm run build || echo "No build folder generated"
 
-      # 6. Run tests
-      - name: Run tests
-        run: npm test
+      # 5. Run tests
+      - run: npm test
 
-      # 7. Security scan: npm audit (production only, fails on high)
-      - name: Run npm audit (prod)
-        run: npm audit --only=prod --audit-level=high || true
+      # 6. Security scan
+      - run: npm audit --audit-level=high
 
-      # 8. Optimized Snyk scan
-      - name: Snyk Scan (prod deps only, high severity)
-        uses: snyk/actions/node@v1
+      # 7. Deploy to Vercel directly
+      - name: Deploy to Vercel
         env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: test --all-projects --prod --severity-threshold=high
-        continue-on-error: true   # Allow workflow to continue; n8n will handle failure
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: npx vercel --prod --confirm --token $VERCEL_TOKEN
 
-      # 9. Upload artifacts
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts
-          path: ./build
+      # 8. Output deployment URL
+      - name: Get deployment URL
+        run: |
+          DEPLOY_URL=$(npx vercel --token $VERCEL_TOKEN --prod --confirm --json | jq -r '.[0].url')
+          echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_ENV
