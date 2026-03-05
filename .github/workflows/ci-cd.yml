@@ -1,5 +1,4 @@
 name: CI-CD-Pipeline
-
 on:
   workflow_dispatch:
   push:
@@ -10,7 +9,6 @@ on:
 jobs:
   build-test-deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -36,14 +34,24 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
+      - name: Install ReportLab
+        run: pip install reportlab
+
+      - name: Generate PDF Audit Report
+        env:
+          REPO_NAME: huecomundo
+          BRANCH_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: python generate_audit_pdf.py audit.json audit_report.pdf
+
       - name: Deploy to Vercel
         id: deploy
         run: |
           DEPLOYMENT_URL=$(npx vercel --prod --yes --token=${{ secrets.VERCEL_TOKEN }} | grep -o 'https://.*\.vercel\.app')
           echo "deployment_url=$DEPLOYMENT_URL" >> $GITHUB_OUTPUT
 
-      - name: Upload Audit Report
+      - name: Upload PDF Audit Report
         uses: actions/upload-artifact@v4
         with:
-          name: audit-report
-          path: audit.json
+          name: audit-report-pdf
+          path: audit_report.pdf
