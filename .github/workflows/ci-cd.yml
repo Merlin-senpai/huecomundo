@@ -25,14 +25,36 @@ jobs:
       - name: Run Build
         run: npm run build || echo "No build script found"
 
-      - name: Run npm audit (non-blocking)
+      - name: Run npm audit (dependency vulnerabilities)
         run: npm audit --json > audit.json || true
 
-      - name: Run Snyk Scan (non-blocking)
+      - name: Run Snyk Open Source Scan (dependency CVEs)
         uses: snyk/actions/node@master
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --json-file-output=snyk-deps.json
+
+      - name: Run Snyk Code Scan (SAST - file and line detail)
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          npm install -g snyk
+          snyk code test --json > snyk-code.json || true
+
+      - name: Run Semgrep SAST (file and line detail)
+        continue-on-error: true
+        run: |
+          pip install semgrep --quiet
+          semgrep scan \
+            --config "p/javascript" \
+            --config "p/nodejs" \
+            --config "p/security-audit" \
+            --json \
+            --output semgrep.json \
+            . || true
 
       - name: Install ReportLab
         run: pip install reportlab
@@ -42,7 +64,7 @@ jobs:
           REPO_NAME: huecomundo
           BRANCH_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
-        run: python generate_audit_pdf.py audit.json audit_report.pdf
+        run: python generate_audit_pdf.py audit.json semgrep.json snyk-code.json audit_report.pdf
 
       - name: Deploy to Vercel
         id: deploy
