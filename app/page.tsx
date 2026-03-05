@@ -78,7 +78,7 @@ export default function Home() {
         <main className="relative z-10 flex min-h-screen flex-col items-center justify-center px-8 text-center">
           <div className="max-w-4xl mx-auto">
             <h1 className="text-6xl md:text-8xl font-bold text-white mb-6 tracking-wider" style={{ textShadow: '0 0 20px rgba(255,255,255,0.5)' }}>
-              HUECO MUNDO
+              HUECOMUNDO
             </h1>
             <p className="text-xl md:text-2xl text-gray-300 mb-8 font-light leading-relaxed">
               The Desert World of Hollows
