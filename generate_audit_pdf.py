@@ -1,295 +1,369 @@
 #!/usr/bin/env python3
 """
 generate_audit_pdf.py
-Reads audit.json (npm audit --json output) and produces a styled PDF report.
-Usage: python generate_audit_pdf.py [audit.json] [output.pdf]
+Combines npm audit + Semgrep SAST + Snyk Code into one PDF with file:line detail.
+Usage: python generate_audit_pdf.py audit.json semgrep.json snyk-code.json output.pdf
 """
 
-import json
-import sys
-import os
-from datetime import datetime
-
+import json, sys, os
+from datetime import datetime, timezone
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import mm
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    HRFlowable, KeepTogether
+    HRFlowable, KeepTogether, PageBreak
 )
 
-# ── Colour palette ────────────────────────────────────────────────────────────
-C_BG_DARK   = colors.HexColor("#0f172a")   # header background
-C_ACCENT    = colors.HexColor("#6366f1")   # indigo accent
-C_CRITICAL  = colors.HexColor("#ef4444")
-C_HIGH      = colors.HexColor("#f97316")
-C_MODERATE  = colors.HexColor("#eab308")
-C_LOW       = colors.HexColor("#3b82f6")
-C_INFO      = colors.HexColor("#8b5cf6")
-C_SUCCESS   = colors.HexColor("#22c55e")
-C_TEXT      = colors.HexColor("#1e293b")
-C_MUTED     = colors.HexColor("#64748b")
-C_ROW_ALT   = colors.HexColor("#f8fafc")
-C_ROW_HEAD  = colors.HexColor("#e2e8f0")
-C_WHITE     = colors.white
+# ── Palette ───────────────────────────────────────────────────────────────────
+DARK    = colors.HexColor("#0f172a")
+ACCENT  = colors.HexColor("#6366f1")
+C_CRIT  = colors.HexColor("#ef4444")
+C_HIGH  = colors.HexColor("#f97316")
+C_MOD   = colors.HexColor("#eab308")
+C_LOW   = colors.HexColor("#3b82f6")
+C_INFO  = colors.HexColor("#8b5cf6")
+C_OK    = colors.HexColor("#22c55e")
+C_TEXT  = colors.HexColor("#1e293b")
+C_MUTED = colors.HexColor("#64748b")
+C_ROW   = colors.HexColor("#f8fafc")
+C_HEAD  = colors.HexColor("#e2e8f0")
+WHITE   = colors.white
 
-SEV_COLORS = {
-    "critical": C_CRITICAL,
-    "high":     C_HIGH,
-    "moderate": C_MODERATE,
-    "low":      C_LOW,
-    "info":     C_INFO,
-}
-
-SEV_ORDER = ["critical", "high", "moderate", "low", "info"]
+SEV_COLOR = {"critical": C_CRIT, "high": C_HIGH, "moderate": C_MOD,
+             "medium": C_MOD, "low": C_LOW, "info": C_INFO, "warning": C_MOD,
+             "error": C_HIGH}
+SEV_ORDER = ["critical", "high", "medium", "moderate", "low", "info", "warning", "error"]
 
 
-# ── Style helpers ─────────────────────────────────────────────────────────────
-def build_styles():
-    base = getSampleStyleSheet()
-    custom = {}
-
-    custom["cover_title"] = ParagraphStyle(
-        "cover_title", fontSize=26, textColor=C_WHITE,
-        fontName="Helvetica-Bold", alignment=TA_CENTER, leading=32
-    )
-    custom["cover_sub"] = ParagraphStyle(
-        "cover_sub", fontSize=11, textColor=colors.HexColor("#cbd5e1"),
-        fontName="Helvetica", alignment=TA_CENTER, leading=16
-    )
-    custom["section_head"] = ParagraphStyle(
-        "section_head", fontSize=13, textColor=C_BG_DARK,
-        fontName="Helvetica-Bold", spaceBefore=14, spaceAfter=6, leading=18
-    )
-    custom["body"] = ParagraphStyle(
-        "body", fontSize=9, textColor=C_TEXT,
-        fontName="Helvetica", leading=14
-    )
-    custom["muted"] = ParagraphStyle(
-        "muted", fontSize=8, textColor=C_MUTED,
-        fontName="Helvetica", leading=12
-    )
-    custom["tag"] = ParagraphStyle(
-        "tag", fontSize=8, textColor=C_WHITE,
-        fontName="Helvetica-Bold", alignment=TA_CENTER
-    )
-    custom["vuln_name"] = ParagraphStyle(
-        "vuln_name", fontSize=9, textColor=C_TEXT,
-        fontName="Helvetica-Bold", leading=13
-    )
-    custom["vuln_desc"] = ParagraphStyle(
-        "vuln_desc", fontSize=8, textColor=C_MUTED,
-        fontName="Helvetica", leading=12
-    )
-    return custom
+def S():
+    return {
+        "h_title": ParagraphStyle("h_title", fontSize=20, textColor=WHITE,
+            fontName="Helvetica-Bold", alignment=TA_CENTER, leading=26),
+        "h_sub":   ParagraphStyle("h_sub", fontSize=9, textColor=colors.HexColor("#cbd5e1"),
+            fontName="Helvetica", alignment=TA_CENTER, leading=14),
+        "sec":     ParagraphStyle("sec", fontSize=11, textColor=DARK,
+            fontName="Helvetica-Bold", spaceBefore=10, spaceAfter=4),
+        "body":    ParagraphStyle("body", fontSize=8, textColor=C_TEXT,
+            fontName="Helvetica", leading=12),
+        "muted":   ParagraphStyle("muted", fontSize=7, textColor=C_MUTED,
+            fontName="Helvetica", leading=11),
+        "badge":   ParagraphStyle("badge", fontSize=7, textColor=WHITE,
+            fontName="Helvetica-Bold", alignment=TA_CENTER),
+        "pkg":     ParagraphStyle("pkg", fontSize=8, textColor=DARK,
+            fontName="Helvetica-Bold", leading=12),
+        "code":    ParagraphStyle("code", fontSize=7, textColor=colors.HexColor("#1e40af"),
+            fontName="Courier", leading=11),
+        "desc":    ParagraphStyle("desc", fontSize=8, textColor=C_MUTED,
+            fontName="Helvetica", leading=12),
+    }
 
 
-def sev_badge(sev, styles):
-    """Small coloured severity pill."""
-    col = SEV_COLORS.get(sev.lower(), C_MUTED)
-    label = sev.upper()
-    cell = Paragraph(f'<font color="white"><b>{label}</b></font>', styles["tag"])
-    t = Table([[cell]], colWidths=[18*mm])
+def badge_cell(sev, styles):
+    col = SEV_COLOR.get(sev.lower(), C_MUTED)
+    t = Table([[Paragraph(f"<b>{sev.upper()}</b>", styles["badge"])]], colWidths=[16*mm])
     t.setStyle(TableStyle([
-        ("BACKGROUND",  (0, 0), (-1, -1), col),
-        ("ROUNDEDCORNERS", [3]),
-        ("TOPPADDING",  (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ("LEFTPADDING",  (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("BACKGROUND",    (0,0),(-1,-1), col),
+        ("TOPPADDING",    (0,0),(-1,-1), 2),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 2),
     ]))
     return t
 
 
-# ── Cover block ───────────────────────────────────────────────────────────────
-def cover_block(story, meta, styles):
+def header_banner(story, meta, styles):
     repo   = meta.get("repo", "huecomundo")
     branch = meta.get("branch", "main")
     commit = meta.get("commit", "")[:7]
-    ts     = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-
-    # Dark header table
-    header_content = [
-        [Paragraph("🛡  Security Audit Report", styles["cover_title"])],
-        [Paragraph(f"Repository: <b>{repo}</b>  ·  Branch: <b>{branch}</b>  ·  Commit: <b>{commit}</b>", styles["cover_sub"])],
-        [Paragraph(f"Generated: {ts}", styles["cover_sub"])],
+    ts     = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    rows = [
+        [Paragraph("Security Audit Report", styles["h_title"])],
+        [Paragraph(f"<b>{repo}</b>  ·  branch: <b>{branch}</b>  ·  commit: <b>{commit}</b>", styles["h_sub"])],
+        [Paragraph(ts, styles["h_sub"])],
     ]
-    header_table = Table(header_content, colWidths=[170*mm])
-    header_table.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, -1), C_BG_DARK),
-        ("TOPPADDING",    (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 14),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 14),
-        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [C_BG_DARK]),
+    t = Table(rows, colWidths=[174*mm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), DARK),
+        ("TOPPADDING",    (0,0),(-1,-1), 10),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 10),
+        ("LEFTPADDING",   (0,0),(-1,-1), 12),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 12),
     ]))
-    story.append(header_table)
-    story.append(Spacer(1, 8*mm))
+    story.append(t)
+    story.append(Spacer(1, 5*mm))
 
 
-# ── Summary scorecard ─────────────────────────────────────────────────────────
-def summary_scorecard(story, totals, pkg_count, styles):
-    story.append(Paragraph("Executive Summary", styles["section_head"]))
-    story.append(HRFlowable(width="100%", thickness=1, color=C_ACCENT, spaceAfter=6))
+# ── SECTION 1: npm audit (dependency CVEs) ────────────────────────────────────
+def section_npm_audit(story, data, styles):
+    meta      = data.get("metadata", {})
+    totals    = meta.get("vulnerabilities", {})
+    pkg_count = meta.get("totalDependencies", 0)
+    vulns     = data.get("vulnerabilities", {})
+    total     = sum(totals.get(s,0) for s in ["critical","high","moderate","low","info"])
 
-    total_vulns = sum(totals.get(s, 0) for s in SEV_ORDER)
-    overall_color = (
-        C_CRITICAL if totals.get("critical", 0) > 0 else
-        C_HIGH     if totals.get("high", 0) > 0 else
-        C_MODERATE if totals.get("moderate", 0) > 0 else
-        C_LOW      if totals.get("low", 0) > 0 else
-        C_SUCCESS
-    )
-    overall_label = (
-        "CRITICAL RISK" if totals.get("critical", 0) > 0 else
-        "HIGH RISK"     if totals.get("high", 0) > 0 else
-        "MODERATE RISK" if totals.get("moderate", 0) > 0 else
-        "LOW RISK"      if totals.get("low", 0) > 0 else
-        "CLEAN"
-    )
+    story.append(Paragraph("1. Dependency Vulnerabilities  (npm audit)", styles["sec"]))
+    story.append(HRFlowable(width="100%", thickness=1, color=ACCENT, spaceAfter=4))
 
-    # Overall status pill
-    status_cell = Paragraph(f'<font color="white"><b>{overall_label}</b></font>', ParagraphStyle(
-        "ol", fontSize=11, textColor=C_WHITE, fontName="Helvetica-Bold", alignment=TA_CENTER
-    ))
-    status_t = Table([[status_cell]], colWidths=[50*mm])
-    status_t.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, -1), overall_color),
-        ("TOPPADDING",    (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-    ]))
+    # summary row
+    def stat(val, label, col="#1e293b"):
+        return Paragraph(f'<font color="{col}"><b>{val}</b></font><br/>'
+                         f'<font color="#64748b" size="7">{label}</font>', styles["body"])
 
-    # Stats row
-    stat_data = [[
-        Paragraph(f'<b>{pkg_count}</b><br/><font color="#64748b" size="8">Packages Audited</font>', styles["body"]),
-        Paragraph(f'<b>{total_vulns}</b><br/><font color="#64748b" size="8">Total Issues</font>', styles["body"]),
-        Paragraph(f'<font color="#ef4444"><b>{totals.get("critical",0)}</b></font><br/><font color="#64748b" size="8">Critical</font>', styles["body"]),
-        Paragraph(f'<font color="#f97316"><b>{totals.get("high",0)}</b></font><br/><font color="#64748b" size="8">High</font>', styles["body"]),
-        Paragraph(f'<font color="#eab308"><b>{totals.get("moderate",0)}</b></font><br/><font color="#64748b" size="8">Moderate</font>', styles["body"]),
-        Paragraph(f'<font color="#3b82f6"><b>{totals.get("low",0)}</b></font><br/><font color="#64748b" size="8">Low</font>', styles["body"]),
+    row = [[
+        stat(pkg_count,                   "Packages"),
+        stat(total,                       "Total"),
+        stat(totals.get("critical",0),    "Critical", "#ef4444"),
+        stat(totals.get("high",0),        "High",     "#f97316"),
+        stat(totals.get("moderate",0),    "Moderate", "#eab308"),
+        stat(totals.get("low",0),         "Low",      "#3b82f6"),
     ]]
-    stat_table = Table(stat_data, colWidths=[28*mm]*6)
-    stat_table.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, -1), C_ROW_ALT),
-        ("BOX",           (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-        ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-        ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING",    (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    grid = Table(row, colWidths=[29*mm]*6)
+    grid.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), C_ROW),
+        ("BOX",           (0,0),(-1,-1), 0.5, C_HEAD),
+        ("GRID",          (0,0),(-1,-1), 0.5, C_HEAD),
+        ("ALIGN",         (0,0),(-1,-1), "CENTER"),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+        ("TOPPADDING",    (0,0),(-1,-1), 7),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 7),
     ]))
+    story.append(grid)
+    story.append(Spacer(1, 3*mm))
 
-    story.append(KeepTogether([stat_table]))
-    story.append(Spacer(1, 4*mm))
-
-
-# ── Vulnerability detail table ────────────────────────────────────────────────
-def vuln_table(story, vulnerabilities, styles):
-    if not vulnerabilities:
-        story.append(Paragraph("✅  No vulnerabilities found.", styles["body"]))
+    if not vulns:
+        story.append(Paragraph("No dependency vulnerabilities found.", styles["body"]))
         return
 
-    story.append(Spacer(1, 4*mm))
-    story.append(Paragraph("Vulnerability Details", styles["section_head"]))
-    story.append(HRFlowable(width="100%", thickness=1, color=C_ACCENT, spaceAfter=6))
-
     # Sort by severity
-    sev_rank = {s: i for i, s in enumerate(SEV_ORDER)}
-    sorted_vulns = sorted(
-        vulnerabilities.items(),
-        key=lambda x: sev_rank.get((x[1].get("severity") or "info").lower(), 99)
-    )
+    rank = {s: i for i, s in enumerate(["critical","high","moderate","low","info"])}
+    sorted_vulns = sorted(vulns.items(),
+        key=lambda x: rank.get((x[1].get("severity") or "info").lower(), 99))
 
-    # Table header
-    header = [
-        Paragraph("<b>Severity</b>", styles["body"]),
-        Paragraph("<b>Package</b>", styles["body"]),
-        Paragraph("<b>Issue / Advisory</b>", styles["body"]),
-        Paragraph("<b>Fix Available</b>", styles["body"]),
-    ]
-    rows = [header]
+    def hdr(t): return Paragraph(f"<b>{t}</b>", styles["body"])
+    rows = [[hdr("Sev"), hdr("Package"), hdr("Vulnerability / CVE"), hdr("Affected Range"), hdr("Fix")]]
 
-    for pkg_name, vuln in sorted_vulns:
-        sev = (vuln.get("severity") or "info").lower()
-        col = SEV_COLORS.get(sev, C_MUTED)
+    for pkg, v in sorted_vulns:
+        sev = (v.get("severity") or "info").lower()
+        titles = []
+        for item in v.get("via", []):
+            if isinstance(item, dict):
+                title = item.get("title","")
+                cve   = item.get("cve","")
+                rng   = item.get("range","")
+                if title:
+                    titles.append(f"{title}{' (' + cve + ')' if cve else ''}")
+        advisory = "<br/>".join(titles) if titles else "See npm advisory"
+        rng = v.get("range","—")
 
-        # Extract advisory titles from `via`
-        via = vuln.get("via", [])
-        advisories = []
-        for v in via:
-            if isinstance(v, dict):
-                title = v.get("title") or v.get("url") or ""
-                cve   = v.get("cve", "")
-                url   = v.get("url", "")
-                line  = title
-                if cve:
-                    line += f" ({cve})"
-                advisories.append(line)
-            elif isinstance(v, str):
-                advisories.append(v)
-        advisory_text = "\n".join(advisories) if advisories else "See npm advisory"
-
-        fix_available = "Yes" if vuln.get("fixAvailable") else "No"
-        fix_color = C_SUCCESS if fix_available == "Yes" else C_CRITICAL
-
-        sev_cell  = Paragraph(f'<font color="white"><b>{sev.upper()}</b></font>', styles["tag"])
-        sev_inner = Table([[sev_cell]], colWidths=[16*mm])
-        sev_inner.setStyle(TableStyle([
-            ("BACKGROUND",    (0, 0), (-1, -1), col),
-            ("TOPPADDING",    (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
+        fix = v.get("fixAvailable")
+        if fix is True:
+            fix_text, fix_col = "Yes", "#22c55e"
+        elif isinstance(fix, dict):
+            breaking = " (breaking)" if fix.get("isSemVerMajor") else ""
+            fix_text = f"Yes{breaking}"
+            fix_col  = "#f97316"
+        else:
+            fix_text, fix_col = "No", "#ef4444"
 
         rows.append([
-            sev_inner,
-            Paragraph(f"<b>{pkg_name}</b>", styles["vuln_name"]),
-            Paragraph(advisory_text.replace("\n", "<br/>"), styles["vuln_desc"]),
-            Paragraph(f'<font color="{fix_color.hexval()}"><b>{fix_available}</b></font>', styles["body"]),
+            badge_cell(sev, styles),
+            Paragraph(f"<b>{pkg}</b>", styles["pkg"]),
+            Paragraph(advisory, styles["desc"]),
+            Paragraph(rng, styles["code"]),
+            Paragraph(f'<font color="{fix_col}"><b>{fix_text}</b></font>', styles["desc"]),
         ])
 
-    col_widths = [20*mm, 35*mm, 90*mm, 22*mm]
-    t = Table(rows, colWidths=col_widths, repeatRows=1)
+    t = Table(rows, colWidths=[18*mm, 36*mm, 72*mm, 26*mm, 22*mm], repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND",     (0,0),(-1,0),  C_HEAD),
+        ("GRID",           (0,0),(-1,-1), 0.4, C_HEAD),
+        ("VALIGN",         (0,0),(-1,-1), "MIDDLE"),
+        ("TOPPADDING",     (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING",  (0,0),(-1,-1), 4),
+        ("LEFTPADDING",    (0,0),(-1,-1), 4),
+        ("ROWBACKGROUNDS", (0,1),(-1,-1), [WHITE, C_ROW]),
+    ]))
+    story.append(t)
 
-    row_styles = [
-        ("BACKGROUND",    (0, 0), (-1, 0),  C_ROW_HEAD),
-        ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
-        ("FONTSIZE",      (0, 0), (-1, -1), 8),
-        ("GRID",          (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
-        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING",    (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 5),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [C_WHITE, C_ROW_ALT]),
-    ]
-    t.setStyle(TableStyle(row_styles))
+
+# ── SECTION 2: Semgrep SAST (file:line) ───────────────────────────────────────
+def section_semgrep(story, data, styles):
+    results = data.get("results", [])
+    errors  = data.get("errors", [])
+
+    story.append(PageBreak())
+    story.append(Paragraph("2. Static Code Analysis  (Semgrep SAST)", styles["sec"]))
+    story.append(HRFlowable(width="100%", thickness=1, color=ACCENT, spaceAfter=4))
+
+    if not results:
+        story.append(Paragraph("No issues found by Semgrep.", styles["body"]))
+        return
+
+    # Count by severity
+    sev_counts = {}
+    for r in results:
+        sev = (r.get("extra", {}).get("severity") or r.get("severity") or "info").lower()
+        sev_counts[sev] = sev_counts.get(sev, 0) + 1
+
+    summary_text = "  ".join(
+        f'<font color="{SEV_COLOR.get(s, C_MUTED).hexval()}"><b>{sev_counts[s]} {s.upper()}</b></font>'
+        for s in SEV_ORDER if s in sev_counts
+    )
+    story.append(Paragraph(f"Found {len(results)} issues:  {summary_text}", styles["body"]))
+    story.append(Spacer(1, 3*mm))
+
+    # Sort: critical first
+    rank = {s: i for i, s in enumerate(SEV_ORDER)}
+    sorted_results = sorted(results, key=lambda r: rank.get(
+        (r.get("extra",{}).get("severity") or r.get("severity","info")).lower(), 99))
+
+    def hdr(t): return Paragraph(f"<b>{t}</b>", styles["body"])
+    rows = [[hdr("Sev"), hdr("File  :  Line"), hdr("Rule / Issue"), hdr("Code snippet")]]
+
+    for r in sorted_results:
+        extra   = r.get("extra", {})
+        sev     = (extra.get("severity") or r.get("severity") or "info").lower()
+        path    = r.get("path", "—")
+        start   = r.get("start", {})
+        line    = start.get("line", "?")
+        col     = start.get("col", "")
+        rule_id = r.get("check_id", "").split(".")[-1]   # last segment only, no full path
+        message = extra.get("message", r.get("message", "")).strip()
+        snippet = (extra.get("lines") or "").strip().replace("\n", " ")[:120]
+
+        loc = f"{path}  :  line {line}" + (f"  col {col}" if col else "")
+
+        rows.append([
+            badge_cell(sev, styles),
+            Paragraph(loc, styles["code"]),
+            Paragraph(f"<b>{rule_id}</b><br/>{message}", styles["desc"]),
+            Paragraph(snippet, styles["code"]),
+        ])
+
+    t = Table(rows, colWidths=[18*mm, 44*mm, 60*mm, 52*mm], repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND",     (0,0),(-1,0),  C_HEAD),
+        ("GRID",           (0,0),(-1,-1), 0.4, C_HEAD),
+        ("VALIGN",         (0,0),(-1,-1), "TOP"),
+        ("TOPPADDING",     (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING",  (0,0),(-1,-1), 4),
+        ("LEFTPADDING",    (0,0),(-1,-1), 4),
+        ("ROWBACKGROUNDS", (0,1),(-1,-1), [WHITE, C_ROW]),
+    ]))
+    story.append(t)
+
+
+# ── SECTION 3: Snyk Code SAST (file:line) ────────────────────────────────────
+def section_snyk_code(story, data, styles):
+    # Snyk Code JSON uses "runs[].results[]" (SARIF-like) or flat "vulnerabilities[]"
+    runs  = data.get("runs", [])
+    flat  = data.get("vulnerabilities", [])
+
+    story.append(PageBreak())
+    story.append(Paragraph("3. Snyk Code Analysis  (SAST)", styles["sec"]))
+    story.append(HRFlowable(width="100%", thickness=1, color=ACCENT, spaceAfter=4))
+
+    issues = []
+
+    # SARIF format
+    for run in runs:
+        for result in run.get("results", []):
+            locs = result.get("locations", [])
+            loc  = locs[0] if locs else {}
+            phy  = loc.get("physicalLocation", {})
+            uri  = phy.get("artifactLocation", {}).get("uri", "—")
+            line = phy.get("region", {}).get("startLine", "?")
+            col  = phy.get("region", {}).get("startColumn", "")
+            sev  = result.get("level", "info").lower()  # "error"/"warning"/"note"
+            # map SARIF levels to readable severity
+            sev_map = {"error": "high", "warning": "moderate", "note": "info"}
+            sev = sev_map.get(sev, sev)
+            msg = result.get("message", {}).get("text", "").strip()
+            rule= result.get("ruleId", "")
+            issues.append({"sev": sev, "file": uri, "line": line, "col": col,
+                           "rule": rule, "msg": msg, "snippet": ""})
+
+    # Flat format fallback
+    for v in flat:
+        sev  = (v.get("severity") or "info").lower()
+        locs = v.get("locations", [{}])
+        loc  = locs[0] if locs else {}
+        uri  = loc.get("uri", v.get("filePath","—"))
+        line = loc.get("startLine", v.get("lineNumber","?"))
+        msg  = v.get("message", v.get("title","")).strip()
+        rule = v.get("id", v.get("ruleId",""))
+        issues.append({"sev": sev, "file": uri, "line": line, "col": "",
+                       "rule": rule, "msg": msg, "snippet": ""})
+
+    if not issues:
+        story.append(Paragraph("No issues found by Snyk Code, or scan output unavailable.", styles["body"]))
+        return
+
+    rank = {s: i for i, s in enumerate(SEV_ORDER)}
+    issues.sort(key=lambda x: rank.get(x["sev"], 99))
+
+    story.append(Paragraph(f"Found {len(issues)} issues.", styles["body"]))
+    story.append(Spacer(1, 3*mm))
+
+    def hdr(t): return Paragraph(f"<b>{t}</b>", styles["body"])
+    rows = [[hdr("Sev"), hdr("File  :  Line"), hdr("Rule"), hdr("Description")]]
+
+    for i in issues:
+        loc = f"{i['file']}  :  line {i['line']}" + (f"  col {i['col']}" if i['col'] else "")
+        rows.append([
+            badge_cell(i["sev"], styles),
+            Paragraph(loc, styles["code"]),
+            Paragraph(i["rule"].split(".")[-1], styles["desc"]),
+            Paragraph(i["msg"], styles["desc"]),
+        ])
+
+    t = Table(rows, colWidths=[18*mm, 50*mm, 36*mm, 70*mm], repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND",     (0,0),(-1,0),  C_HEAD),
+        ("GRID",           (0,0),(-1,-1), 0.4, C_HEAD),
+        ("VALIGN",         (0,0),(-1,-1), "TOP"),
+        ("TOPPADDING",     (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING",  (0,0),(-1,-1), 4),
+        ("LEFTPADDING",    (0,0),(-1,-1), 4),
+        ("ROWBACKGROUNDS", (0,1),(-1,-1), [WHITE, C_ROW]),
+    ]))
     story.append(t)
 
 
 # ── Footer ────────────────────────────────────────────────────────────────────
-def footer_note(story, styles):
-    story.append(Spacer(1, 8*mm))
+def footer(story, styles):
+    story.append(Spacer(1, 6*mm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=C_MUTED))
     story.append(Spacer(1, 2*mm))
     story.append(Paragraph(
-        "Generated by n8n CI/CD Monitor  ·  Data source: npm audit --json  ·  "
-        "Fix vulnerabilities with <b>npm audit fix</b> or upgrade affected packages.",
+        "Generated by n8n CI/CD Monitor  ·  "
+        "Sources: npm audit, Semgrep SAST, Snyk Code  ·  "
+        "Run <b>npm audit fix</b> for dependency fixes.",
         styles["muted"]
     ))
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-def generate(audit_path: str, output_path: str, meta: dict = None):
-    with open(audit_path) as f:
-        data = json.load(f)
+# ── Entry point ───────────────────────────────────────────────────────────────
+def load_json(path):
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
-    meta = meta or {}
-    styles = build_styles()
+
+def generate(audit_path, semgrep_path, snyk_code_path, output_path, meta=None):
+    audit_data     = load_json(audit_path)
+    semgrep_data   = load_json(semgrep_path)
+    snyk_code_data = load_json(snyk_code_path)
+    meta           = meta or {}
+    styles_map     = S()
 
     doc = SimpleDocTemplate(
-        output_path,
-        pagesize=A4,
+        output_path, pagesize=A4,
         leftMargin=18*mm, rightMargin=18*mm,
         topMargin=14*mm,  bottomMargin=18*mm,
         title="Security Audit Report",
@@ -297,30 +371,25 @@ def generate(audit_path: str, output_path: str, meta: dict = None):
     )
 
     story = []
-
-    # Metadata
-    audit_meta  = data.get("metadata", {})
-    totals      = audit_meta.get("vulnerabilities", {})
-    pkg_count   = audit_meta.get("totalDependencies", 0)
-    vulns       = data.get("vulnerabilities", {})
-
-    cover_block(story, meta, styles)
-    summary_scorecard(story, totals, pkg_count, styles)
-    vuln_table(story, vulns, styles)
-    footer_note(story, styles)
-
+    header_banner(story, meta, styles_map)
+    section_npm_audit(story, audit_data, styles_map)
+    section_semgrep(story, semgrep_data, styles_map)
+    section_snyk_code(story, snyk_code_data, styles_map)
+    footer(story, styles_map)
     doc.build(story)
-    print(f"PDF written to {output_path}")
+    print(f"PDF written -> {output_path}")
 
 
 if __name__ == "__main__":
-    audit_in = sys.argv[1] if len(sys.argv) > 1 else "audit.json"
-    pdf_out  = sys.argv[2] if len(sys.argv) > 2 else "audit_report.pdf"
+    args = sys.argv[1:]
+    audit_path     = args[0] if len(args) > 0 else "audit.json"
+    semgrep_path   = args[1] if len(args) > 1 else "semgrep.json"
+    snyk_code_path = args[2] if len(args) > 2 else "snyk-code.json"
+    output_path    = args[3] if len(args) > 3 else "audit_report.pdf"
 
-    # Optional meta from env (set by GitHub Actions)
     meta = {
         "repo":   os.environ.get("REPO_NAME", "huecomundo"),
         "branch": os.environ.get("BRANCH_NAME", "main"),
         "commit": os.environ.get("COMMIT_SHA", ""),
     }
-    generate(audit_in, pdf_out, meta)
+    generate(audit_path, semgrep_path, snyk_code_path, output_path, meta)
