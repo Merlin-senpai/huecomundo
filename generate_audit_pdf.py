@@ -348,8 +348,13 @@ def footer(story, styles):
 def load_json(path):
     if not path or not os.path.exists(path):
         return {}
+    # Sanitize: resolve absolute path and ensure it stays within working directory
+    safe_path = os.path.realpath(path)
+    cwd = os.path.realpath(os.getcwd())
+    if not safe_path.startswith(cwd):
+        raise ValueError(f"Path traversal attempt blocked: {path}")
     try:
-        with open(path) as f:
+        with open(safe_path) as f:
             return json.load(f)
     except Exception:
         return {}
