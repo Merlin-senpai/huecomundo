@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-generate_audit_pdf.py
-Combines npm audit + Semgrep SAST + Snyk Code into one PDF with file:line detail.
+generate_audit_pdf.py — Universal DevSecOps PDF Report Generator
+Supports: npm audit (Node.js), pip-audit (Python), composer audit (PHP), OWASP DC (Java)
 Usage: python generate_audit_pdf.py audit.json semgrep.json snyk-code.json output.pdf
+Stack auto-detected or set STACK env var: nodejs | python | php | java
 """
 
 import json, sys, os
@@ -94,29 +95,137 @@ def header_banner(story, meta, styles):
     story.append(Spacer(1, 5*mm))
 
 
-# ── SECTION 1: npm audit (dependency CVEs) ────────────────────────────────────
-def section_npm_audit(story, data, styles):
-    meta      = data.get("metadata", {})
-    totals    = meta.get("vulnerabilities", {})
-    pkg_count = meta.get("totalDependencies", 0)
-    vulns     = data.get("vulnerabilities", {})
-    total     = sum(totals.get(s,0) for s in ["critical","high","moderate","low","info"])
+# ── SECTION 1: Dependency Audit (universal — auto-detects stack) ─────────────
 
-    story.append(Paragraph("1. Dependency Vulnerabilities  (npm audit)", styles["sec"]))
+def detect_stack(data):
+    """Auto-detect stack from audit.json format if STACK env not set."""
+    stack = os.environ.get("STACK", "").lower()
+    if stack:
+        return stack
+    if "vulnerabilities" in data and "metadata" in data:
+        return "nodejs"
+    if "dependencies" in data and isinstance(data.get("dependencies"), list):
+        # pip-audit format
+        for dep in data.get("dependencies", []):
+            if "vulns" in dep:
+                return "python"
+    if "advisories" in data:
+        return "php"
+    if "dependencies" in data and isinstance(data.get("dependencies"), dict):
+        return "java"
+    return "nodejs"  # fallback
+
+
+def normalize_vulns(data, stack):
+    """Normalize all scanner formats into a common list of dicts."""
+    vulns = []
+
+    if stack == "nodejs":
+        raw = data.get("vulnerabilities", {})
+        for pkg, v in raw.items():
+            sev = (v.get("severity") or "info").lower()
+            titles = []
+            for item in v.get("via", []):
+                if isinstance(item, dict) and item.get("title"):
+                    cve = item.get("cve", "")
+                    titles.append(f"{item['title']}{' (' + cve + ')' if cve else ''}")
+            fix = v.get("fixAvailable")
+            if fix is True:
+                fix_text = "Yes"
+            elif isinstance(fix, dict):
+                fix_text = "Yes (breaking)" if fix.get("isSemVerMajor") else "Yes"
+            else:
+                fix_text = "No"
+            vulns.append({
+                "sev": sev, "pkg": pkg,
+                "advisory": "<br/>".join(titles) if titles else "See npm advisory",
+                "range": v.get("range", "—"), "fix": fix_text
+            })
+
+    elif stack == "python":
+        # pip-audit format: {"dependencies": [{"name": "pkg", "version": "x", "vulns": [...]}]}
+        for dep in data.get("dependencies", []):
+            for vuln in dep.get("vulns", []):
+                sev = vuln.get("fix_versions") and "moderate" or "high"
+                fix_text = "Yes" if vuln.get("fix_versions") else "No"
+                vulns.append({
+                    "sev": sev,
+                    "pkg": f"{dep.get('name', '')} {dep.get('version', '')}",
+                    "advisory": vuln.get("description", vuln.get("id", "See advisory")),
+                    "range": dep.get("version", "—"),
+                    "fix": fix_text
+                })
+
+    elif stack == "php":
+        # composer audit format: {"advisories": {"pkg": [{"advisoryId": ..., "title": ..., "severity": ...}]}}
+        advisories = data.get("advisories", {})
+        if isinstance(advisories, dict):
+            for pkg, adv_list in advisories.items():
+                for adv in (adv_list if isinstance(adv_list, list) else [adv_list]):
+                    sev = (adv.get("severity") or "medium").lower()
+                    vulns.append({
+                        "sev": sev, "pkg": pkg,
+                        "advisory": adv.get("title", adv.get("advisoryId", "See advisory")),
+                        "range": adv.get("affectedVersions", "—"),
+                        "fix": "Yes" if adv.get("reportedAt") else "Unknown"
+                    })
+
+    elif stack == "java":
+        # OWASP dependency-check JSON format
+        deps = data.get("dependencies", [])
+        if isinstance(deps, list):
+            for dep in deps:
+                for vuln in dep.get("vulnerabilities", []):
+                    sev = (vuln.get("severity") or "medium").lower()
+                    cvss = vuln.get("cvssv3", vuln.get("cvssv2", {}))
+                    vulns.append({
+                        "sev": sev,
+                        "pkg": dep.get("fileName", dep.get("name", "unknown")),
+                        "advisory": f"{vuln.get('name', '')} — {vuln.get('description', '')[:120]}",
+                        "range": dep.get("version", "—"),
+                        "fix": "Check NVD"
+                    })
+
+    rank = {s: i for i, s in enumerate(["critical", "high", "medium", "moderate", "low", "info"])}
+    vulns.sort(key=lambda x: rank.get(x["sev"], 99))
+    return vulns
+
+
+STACK_LABELS = {
+    "nodejs": "npm audit",
+    "python": "pip-audit",
+    "php":    "composer audit",
+    "java":   "OWASP Dependency Check",
+}
+
+
+def section_dependency_audit(story, data, styles):
+    stack     = detect_stack(data)
+    label     = STACK_LABELS.get(stack, "Dependency Audit")
+    vulns     = normalize_vulns(data, stack)
+
+    # Count by severity for summary
+    counts = {"critical": 0, "high": 0, "moderate": 0, "medium": 0, "low": 0}
+    for v in vulns:
+        s = v["sev"]
+        if s in counts:
+            counts[s] += 1
+    moderate_total = counts["moderate"] + counts["medium"]
+
+    story.append(Paragraph(f"1. Dependency Vulnerabilities  ({label})", styles["sec"]))
     story.append(HRFlowable(width="100%", thickness=1, color=ACCENT, spaceAfter=4))
 
-    # summary row
     def stat(val, label, col="#1e293b"):
         return Paragraph(f'<font color="{col}"><b>{val}</b></font><br/>'
                          f'<font color="#64748b" size="7">{label}</font>', styles["body"])
 
     row = [[
-        stat(pkg_count,                   "Packages"),
-        stat(total,                       "Total"),
-        stat(totals.get("critical",0),    "Critical", "#ef4444"),
-        stat(totals.get("high",0),        "High",     "#f97316"),
-        stat(totals.get("moderate",0),    "Moderate", "#eab308"),
-        stat(totals.get("low",0),         "Low",      "#3b82f6"),
+        stat(len(vulns),          "Total"),
+        stat(counts["critical"],  "Critical", "#ef4444"),
+        stat(counts["high"],      "High",     "#f97316"),
+        stat(moderate_total,      "Moderate", "#eab308"),
+        stat(counts["low"],       "Low",      "#3b82f6"),
+        stat(stack.upper(),       "Stack"),
     ]]
     grid = Table(row, colWidths=[29*mm]*6)
     grid.setStyle(TableStyle([
@@ -135,43 +244,17 @@ def section_npm_audit(story, data, styles):
         story.append(Paragraph("No dependency vulnerabilities found.", styles["body"]))
         return
 
-    # Sort by severity
-    rank = {s: i for i, s in enumerate(["critical","high","moderate","low","info"])}
-    sorted_vulns = sorted(vulns.items(),
-        key=lambda x: rank.get((x[1].get("severity") or "info").lower(), 99))
-
     def hdr(t): return Paragraph(f"<b>{t}</b>", styles["body"])
     rows = [[hdr("Sev"), hdr("Package"), hdr("Vulnerability / CVE"), hdr("Affected Range"), hdr("Fix")]]
 
-    for pkg, v in sorted_vulns:
-        sev = (v.get("severity") or "info").lower()
-        titles = []
-        for item in v.get("via", []):
-            if isinstance(item, dict):
-                title = item.get("title","")
-                cve   = item.get("cve","")
-                rng   = item.get("range","")
-                if title:
-                    titles.append(f"{title}{' (' + cve + ')' if cve else ''}")
-        advisory = "<br/>".join(titles) if titles else "See npm advisory"
-        rng = v.get("range","—")
-
-        fix = v.get("fixAvailable")
-        if fix is True:
-            fix_text, fix_col = "Yes", "#22c55e"
-        elif isinstance(fix, dict):
-            breaking = " (breaking)" if fix.get("isSemVerMajor") else ""
-            fix_text = f"Yes{breaking}"
-            fix_col  = "#f97316"
-        else:
-            fix_text, fix_col = "No", "#ef4444"
-
+    for v in vulns:
+        fix_col = "#22c55e" if v["fix"] == "Yes" else "#f97316" if "breaking" in v["fix"] else "#ef4444"
         rows.append([
-            badge_cell(sev, styles),
-            Paragraph(f"<b>{pkg}</b>", styles["pkg"]),
-            Paragraph(advisory, styles["desc"]),
-            Paragraph(rng, styles["code"]),
-            Paragraph(f'<font color="{fix_col}"><b>{fix_text}</b></font>', styles["desc"]),
+            badge_cell(v["sev"], styles),
+            Paragraph(f"<b>{v['pkg']}</b>", styles["pkg"]),
+            Paragraph(v["advisory"], styles["desc"]),
+            Paragraph(v["range"], styles["code"]),
+            Paragraph(f'<font color="{fix_col}"><b>{v["fix"]}</b></font>', styles["desc"]),
         ])
 
     t = Table(rows, colWidths=[18*mm, 36*mm, 72*mm, 26*mm, 22*mm], repeatRows=1)
@@ -338,8 +421,7 @@ def footer(story, styles):
     story.append(Spacer(1, 2*mm))
     story.append(Paragraph(
         "Generated by n8n CI/CD Monitor  ·  "
-        "Sources: npm audit, Semgrep SAST, Snyk Code  ·  "
-        "Run <b>npm audit fix</b> for dependency fixes.",
+        "Sources: Dependency Audit (npm/pip/composer/OWASP), Semgrep SAST, Snyk Code",
         styles["muted"]
     ))
 
@@ -348,13 +430,12 @@ def footer(story, styles):
 def load_json(path):
     if not path or not os.path.exists(path):
         return {}
-    # Sanitize: resolve absolute path and ensure it stays within working directory
     safe_path = os.path.realpath(path)
     cwd = os.path.realpath(os.getcwd())
     if not safe_path.startswith(cwd + os.sep):
         raise ValueError(f"Path traversal attempt blocked: {path}")
     try:
-        with open(safe_path) as f:  # noqa: PT  # nosec B open is path-traversal safe: sanitized above
+        with open(safe_path) as f:  # nosec B open is path-traversal safe: sanitized above
             return json.load(f)
     except Exception:
         return {}
@@ -377,7 +458,7 @@ def generate(audit_path, semgrep_path, snyk_code_path, output_path, meta=None):
 
     story = []
     header_banner(story, meta, styles_map)
-    section_npm_audit(story, audit_data, styles_map)
+    section_dependency_audit(story, audit_data, styles_map)
     section_semgrep(story, semgrep_data, styles_map)
     section_snyk_code(story, snyk_code_data, styles_map)
     footer(story, styles_map)
