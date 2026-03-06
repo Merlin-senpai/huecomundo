@@ -351,10 +351,10 @@ def load_json(path):
     # Sanitize: resolve absolute path and ensure it stays within working directory
     safe_path = os.path.realpath(path)
     cwd = os.path.realpath(os.getcwd())
-    if not safe_path.startswith(cwd):
+    if not safe_path.startswith(cwd + os.sep):
         raise ValueError(f"Path traversal attempt blocked: {path}")
     try:
-        with open(safe_path) as f:
+        with open(safe_path) as f:  # noqa: PT  # nosec B open is path-traversal safe: sanitized above
             return json.load(f)
     except Exception:
         return {}
